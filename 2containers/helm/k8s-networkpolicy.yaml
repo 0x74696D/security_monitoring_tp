@@ -1,0 +1,18 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vuln-app-network-policy
+spec:
+  podSelector:
+    matchLabels:
+      app: vuln-app
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - ipBlock:
+        cidr: 196.235.14.92/32
+    ports:
+    - protocol: TCP
+      port: 8080
+

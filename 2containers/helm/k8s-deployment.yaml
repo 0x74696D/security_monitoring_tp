@@ -1,0 +1,22 @@
+#deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vuln-app
+  labels:
+    app: vuln-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vuln-app
+  template:
+    metadata:
+      labels:
+        app: vuln-app
+    spec:
+      containers:
+      - name: vuln-app
+        image: us-central1-docker.pkg.dev/bounc-473410/lab-test-repo/vuln-app
+        ports:
+        - containerPort: 8080
