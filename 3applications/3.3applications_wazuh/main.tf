@@ -1,19 +1,23 @@
 # VPC Network
 resource "google_compute_network" "wazuh_vpc" {
-  count                   = var.use_default_vpc ? 0 : 1
-  name                    = var.network_name
-  auto_create_subnetworks = false
-  project                 = var.project_id
+  count                            = var.use_default_vpc ? 0 : 1
+  name                             = var.network_name
+  auto_create_subnetworks          = false
+  enable_ula_internal_ipv6         = true
+  internal_ipv6_range              = null
+  project                          = var.project_id
 }
 
 # Subnet
 resource "google_compute_subnetwork" "wazuh_subnet" {
-  count         = var.use_default_vpc ? 0 : 1
-  name          = var.subnet_name
-  ip_cidr_range = var.subnet_cidr
-  region        = var.region
-  network       = google_compute_network.wazuh_vpc[0].id
-  project       = var.project_id
+  count                    = var.use_default_vpc ? 0 : 1
+  name                     = var.subnet_name
+  ip_cidr_range            = var.subnet_cidr
+  region                   = var.region
+  network                  = google_compute_network.wazuh_vpc[0].id
+  project                  = var.project_id
+  stack_type               = "IPV4_IPV6"
+  ipv6_access_type         = "EXTERNAL"
 
   log_config {
     aggregation_interval = "INTERVAL_10_MIN"
@@ -22,9 +26,9 @@ resource "google_compute_subnetwork" "wazuh_subnet" {
   }
 }
 
-# Firewall Rule: Allow SSH from specified CIDR
-resource "google_compute_firewall" "allow_ssh" {
-  name    = "${var.network_name}-allow-ssh"
+# Firewall Rule: Allow SSH from specified CIDR (IPv4)
+resource "google_compute_firewall" "allow_ssh_ipv4" {
+  name    = "${var.network_name}-allow-ssh-ipv4"
   network = var.use_default_vpc ? "default" : google_compute_network.wazuh_vpc[0].name
   project = var.project_id
 
@@ -33,7 +37,27 @@ resource "google_compute_firewall" "allow_ssh" {
     ports    = ["22"]
   }
 
-  source_ranges = [var.allowed_ssh_cidr]
+  source_ranges = var.allowed_ssh_cidr_ipv4
+  target_tags   = ["wazuh-ssh"]
+
+  log_config {
+    metadata = "INCLUDE_ALL_METADATA"
+  }
+}
+
+# Firewall Rule: Allow SSH from specified CIDR (IPv6)
+resource "google_compute_firewall" "allow_ssh_ipv6" {
+  count   = length(var.allowed_ssh_cidr_ipv6) > 0 ? 1 : 0
+  name    = "${var.network_name}-allow-ssh-ipv6"
+  network = var.use_default_vpc ? "default" : google_compute_network.wazuh_vpc[0].name
+  project = var.project_id
+
+  allow {
+    protocol = "tcp"
+    ports    = ["22"]
+  }
+
+  source_ranges = var.allowed_ssh_cidr_ipv6
   target_tags   = ["wazuh-ssh"]
 
   log_config {
@@ -65,9 +89,9 @@ resource "google_compute_firewall" "allow_internal" {
   source_ranges = [var.subnet_cidr]
 }
 
-# Firewall Rule: Allow egress (default, but explicit)
-resource "google_compute_firewall" "allow_egress" {
-  name      = "${var.network_name}-allow-egress"
+# Firewall Rule: Allow egress (IPv4)
+resource "google_compute_firewall" "allow_egress_ipv4" {
+  name      = "${var.network_name}-allow-egress-ipv4"
   network   = var.use_default_vpc ? "default" : google_compute_network.wazuh_vpc[0].name
   project   = var.project_id
   direction = "EGRESS"
@@ -77,6 +101,21 @@ resource "google_compute_firewall" "allow_egress" {
   }
 
   destination_ranges = ["0.0.0.0/0"]
+}
+
+# Firewall Rule: Allow egress (IPv6)
+resource "google_compute_firewall" "allow_egress_ipv6" {
+  count     = var.use_default_vpc ? 0 : 1
+  name      = "${var.network_name}-allow-egress-ipv6"
+  network   = google_compute_network.wazuh_vpc[0].name
+  project   = var.project_id
+  direction = "EGRESS"
+
+  allow {
+    protocol = "all"
+  }
+
+  destination_ranges = ["::/0"]
 }
 
 # Service Account for Wazuh VM
@@ -128,51 +167,11 @@ resource "google_secret_manager_secret_version" "wazuh_admin_password_version" {
   secret_data = var.wazuh_admin_password
 }
 
-# Pub/Sub Topic for Cloud Logging export (if enabled)
-resource "google_pubsub_topic" "wazuh_logs" {
-  count   = var.enable_log_export ? 1 : 0
-  name    = var.pubsub_topic_name
+# IAM: Grant Pub/Sub subscriber permissions for GCP integration
+resource "google_project_iam_member" "wazuh_pubsub_subscriber" {
   project = var.project_id
-
-  labels = var.labels
-}
-
-# Pub/Sub Subscription for log ingestion
-resource "google_pubsub_subscription" "wazuh_logs_sub" {
-  count   = var.enable_log_export ? 1 : 0
-  name    = "${var.pubsub_topic_name}-sub"
-  topic   = google_pubsub_topic.wazuh_logs[0].name
-  project = var.project_id
-
-  # Message retention for 7 days
-  message_retention_duration = "604800s"
-
-  # Acknowledgment deadline
-  ack_deadline_seconds = 20
-
-  labels = var.labels
-}
-
-# Cloud Logging Sink (if enabled)
-resource "google_logging_project_sink" "wazuh_logs_sink" {
-  count       = var.enable_log_export ? 1 : 0
-  name        = "wazuh-logs-sink"
-  destination = "pubsub.googleapis.com/${google_pubsub_topic.wazuh_logs[0].id}"
-  project     = var.project_id
-
-  # Export all logs (adjust filter as needed)
-  filter = "resource.type=gce_instance AND resource.labels.instance_id=${google_compute_instance.wazuh_vm.instance_id}"
-
-  unique_writer_identity = true
-}
-
-# Grant Pub/Sub publisher role to logging sink service account
-resource "google_pubsub_topic_iam_member" "log_sink_publisher" {
-  count   = var.enable_log_export ? 1 : 0
-  project = var.project_id
-  topic   = google_pubsub_topic.wazuh_logs[0].name
-  role    = "roles/pubsub.publisher"
-  member  = google_logging_project_sink.wazuh_logs_sink[0].writer_identity
+  role    = "roles/pubsub.subscriber"
+  member  = "serviceAccount:${google_service_account.wazuh_sa.email}"
 }
 
 # Compute Instance: Wazuh All-in-One
@@ -195,10 +194,19 @@ resource "google_compute_instance" "wazuh_vm" {
   network_interface {
     network    = var.use_default_vpc ? "default" : google_compute_network.wazuh_vpc[0].name
     subnetwork = var.use_default_vpc ? null : google_compute_subnetwork.wazuh_subnet[0].name
+    stack_type = var.use_default_vpc ? null : "IPV4_IPV6"
 
-    # Assign external IP for SSH access
+    # Assign external IPv4 for SSH access
     access_config {
-      # Ephemeral IP
+      # Ephemeral IPv4
+    }
+
+    # Assign external IPv6 for SSH access
+    dynamic "ipv6_access_config" {
+      for_each = var.use_default_vpc ? [] : [1]
+      content {
+        network_tier = "PREMIUM"
+      }
     }
   }
 
@@ -209,14 +217,18 @@ resource "google_compute_instance" "wazuh_vm" {
 
   metadata = {
     enable-oslogin = var.enable_os_login ? "TRUE" : "FALSE"
+    gcp-sa-key     = file(var.gcp_service_account_key_path)
   }
 
   metadata_startup_script = templatefile("${path.module}/install.sh", {
-    use_secret_manager = var.use_secret_manager
-    secret_name        = var.secret_name
-    project_id         = var.project_id
-    admin_password     = var.wazuh_admin_password
-    wazuh_version      = var.wazuh_version
+    use_secret_manager     = var.use_secret_manager
+    secret_name            = var.secret_name
+    project_id             = var.project_id
+    admin_password         = var.wazuh_admin_password
+    wazuh_version          = var.wazuh_version
+    gcp_sa_key_path        = var.gcp_service_account_key_path
+    pubsub_project_id      = var.pubsub_project_id
+    pubsub_subscription_id = var.pubsub_subscription_id
   })
 
   labels = var.labels
@@ -226,7 +238,8 @@ resource "google_compute_instance" "wazuh_vm" {
 
   # Depends on firewall rules and service account IAM
   depends_on = [
-    google_compute_firewall.allow_ssh,
+    google_compute_firewall.allow_ssh_ipv4,
+    google_compute_firewall.allow_ssh_ipv6,
     google_project_iam_member.wazuh_logging,
     google_project_iam_member.wazuh_monitoring,
     google_project_iam_member.wazuh_secret_accessor,

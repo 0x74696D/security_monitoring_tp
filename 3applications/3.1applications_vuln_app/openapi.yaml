@@ -1,0 +1,244 @@
+swagger: "2.0"
+info:
+  title: Security Lab API
+  description: Serverless security logging lab application
+  version: "1.0.0"
+schemes:
+  - https
+produces:
+  - application/json
+consumes:
+  - application/json
+
+# Security definitions
+securityDefinitions:
+  firebase:
+    authorizationUrl: ""
+    flow: implicit
+    type: oauth2
+    x-google-issuer: "https://securetoken.google.com/${project_id}"
+    x-google-jwks_uri: "https://www.googleapis.com/service_accounts/v1/metadata/x509/securetoken@system.gserviceaccount.com"
+    x-google-audiences: "${project_id}"
+
+paths:
+  /health:
+    get:
+      summary: Health check endpoint
+      operationId: healthCheck
+      x-google-backend:
+        address: ${function_url}
+        path_translation: APPEND_PATH_TO_ADDRESS
+      responses:
+        200:
+          description: Service is healthy
+          schema:
+            type: object
+            properties:
+              status:
+                type: string
+              timestamp:
+                type: string
+
+  /auth/audit:
+    post:
+      summary: Audit authentication events
+      operationId: authAudit
+      x-google-backend:
+        address: ${function_url}
+        path_translation: APPEND_PATH_TO_ADDRESS
+      parameters:
+        - in: body
+          name: body
+          required: true
+          schema:
+            type: object
+            required:
+              - action
+              - outcome
+            properties:
+              action:
+                type: string
+                enum: [login, logout]
+              outcome:
+                type: string
+                enum: [success, failure]
+              email:
+                type: string
+      responses:
+        200:
+          description: Audit logged
+          schema:
+            type: object
+
+  /profile:
+    get:
+      summary: Get user profile
+      operationId: getProfile
+      security:
+        - firebase: []
+      x-google-backend:
+        address: ${function_url}
+        path_translation: APPEND_PATH_TO_ADDRESS
+      responses:
+        200:
+          description: User profile
+          schema:
+            type: object
+            properties:
+              user_id:
+                type: string
+              email:
+                type: string
+              created_at:
+                type: string
+        401:
+          description: Unauthorized
+
+  /images/upload:
+    post:
+      summary: Upload an image
+      operationId: uploadImage
+      security:
+        - firebase: []
+      x-google-backend:
+        address: ${function_url}
+        path_translation: APPEND_PATH_TO_ADDRESS
+      consumes:
+        - multipart/form-data
+      responses:
+        200:
+          description: Image uploaded successfully
+          schema:
+            type: object
+            properties:
+              image_id:
+                type: string
+              storage_path:
+                type: string
+              upload_time:
+                type: string
+        401:
+          description: Unauthorized
+        400:
+          description: Bad request
+
+  /images/{imageId}:
+    get:
+      summary: Get image
+      operationId: getImage
+      security:
+        - firebase: []
+      x-google-backend:
+        address: ${function_url}
+        path_translation: APPEND_PATH_TO_ADDRESS
+      parameters:
+        - in: path
+          name: imageId
+          type: string
+          required: true
+          description: Image ID
+      responses:
+        200:
+          description: Signed URL for image
+          schema:
+            type: object
+            properties:
+              signed_url:
+                type: string
+              image_id:
+                type: string
+              metadata:
+                type: object
+        401:
+          description: Unauthorized
+        403:
+          description: Forbidden - not owner
+        404:
+          description: Not found
+
+    delete:
+      summary: Delete image
+      operationId: deleteImage
+      security:
+        - firebase: []
+      x-google-backend:
+        address: ${function_url}
+        path_translation: APPEND_PATH_TO_ADDRESS
+      parameters:
+        - in: path
+          name: imageId
+          type: string
+          required: true
+          description: Image ID
+      responses:
+        200:
+          description: Image deleted successfully
+          schema:
+            type: object
+            properties:
+              message:
+                type: string
+              image_id:
+                type: string
+        401:
+          description: Unauthorized
+        403:
+          description: Forbidden - not owner
+        404:
+          description: Not found
+
+  /export:
+    get:
+      summary: Export user's image metadata
+      operationId: exportImages
+      security:
+        - firebase: []
+      x-google-backend:
+        address: ${function_url}
+        path_translation: APPEND_PATH_TO_ADDRESS
+      responses:
+        200:
+          description: List of user's images
+          schema:
+            type: object
+            properties:
+              user_id:
+                type: string
+              images:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    image_id:
+                      type: string
+                    storage_path:
+                      type: string
+                    created_at:
+                      type: string
+        401:
+          description: Unauthorized
+
+  /admin:
+    get:
+      summary: Admin-only endpoint
+      operationId: adminEndpoint
+      security:
+        - firebase: []
+      x-google-backend:
+        address: ${function_url}
+        path_translation: APPEND_PATH_TO_ADDRESS
+      responses:
+        200:
+          description: Admin data
+          schema:
+            type: object
+            properties:
+              message:
+                type: string
+              stats:
+                type: object
+        401:
+          description: Unauthorized
+        403:
+          description: Forbidden - not admin
+

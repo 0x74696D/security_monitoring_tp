@@ -1,0 +1,38 @@
+# Example terraform.tfvars configuration file
+# Copy this file to terraform.tfvars and customize with your values
+
+# REQUIRED: Your GCP Project ID
+project_id = "your-gcp-project-id"
+
+# GCP Region for resources
+region = "us-central1"
+
+# Environment (must be 'lab' to enable lab modes)
+environment = "lab"
+
+# SECURITY: Restrict access to your IP address
+# Get your IP: curl ifconfig.me
+# Default allows all IPs - CHANGE THIS!
+ip_allowlist = ["0.0.0.0/0"]  # REPLACE WITH YOUR IP: "1.2.3.4/32"
+
+# Enable Firestore for metadata storage (recommended)
+enable_firestore = true
+
+# Optional: Custom bucket name (must be globally unique)
+# Leave empty to auto-generate
+bucket_name = ""
+
+# ========================================
+# LAB MODE TOGGLES - DO NOT ENABLE IN PRODUCTION
+# ========================================
+# These introduce intentional security vulnerabilities
+# for training purposes ONLY
+# 
+# Can only be enabled when environment = "lab"
+
+# Enable IDOR vulnerability (bypass object ownership checks)
+lab_mode_skip_object_ownership_check = false
+
+# Enable weak JWT validation (bypass token verification)
+lab_mode_weak_token_validation = false
+

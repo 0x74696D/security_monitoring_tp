@@ -43,9 +43,21 @@ variable "subnet_cidr" {
 
 # Firewall Configuration
 variable "allowed_ssh_cidr" {
-  description = "CIDR range allowed to SSH to the VM (e.g., your public IP/32)"
+  description = "DEPRECATED: Use allowed_ssh_cidr_ipv4 and allowed_ssh_cidr_ipv6 instead"
   type        = string
-  default     = "0.0.0.0/0" # CHANGE THIS TO YOUR IP/32 for production
+  default     = null
+}
+
+variable "allowed_ssh_cidr_ipv4" {
+  description = "List of IPv4 CIDR ranges allowed to SSH to the VM (e.g., [\"1.2.3.4/32\"])"
+  type        = list(string)
+  default     = ["0.0.0.0/0"] # CHANGE THIS TO YOUR IP/32 for production
+}
+
+variable "allowed_ssh_cidr_ipv6" {
+  description = "List of IPv6 CIDR ranges allowed to SSH to the VM (e.g., [\"2001:db8::/32\"])"
+  type        = list(string)
+  default     = []
 }
 
 # Compute Instance Configuration
@@ -120,13 +132,29 @@ variable "secret_name" {
 variable "enable_log_export" {
   description = "Enable Cloud Logging export to Pub/Sub"
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "pubsub_topic_name" {
-  description = "Pub/Sub topic name for log export"
+  description = "Pub/Sub topic name for log export (deprecated - kept for compatibility)"
   type        = string
   default     = "wazuh-logs"
+}
+
+# GCP Pub/Sub Integration Configuration
+variable "gcp_service_account_key_path" {
+  description = "Path to GCP service account JSON key file (wazuh.json) for Pub/Sub integration"
+  type        = string
+}
+
+variable "pubsub_project_id" {
+  description = "GCP Project ID where the Pub/Sub subscription exists"
+  type        = string
+}
+
+variable "pubsub_subscription_id" {
+  description = "GCP Pub/Sub subscription ID to pull logs from"
+  type        = string
 }
 
 # Labels

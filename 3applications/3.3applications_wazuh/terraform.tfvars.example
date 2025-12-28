@@ -1,0 +1,46 @@
+# Project Configuration
+project_id = "telecom-3app"
+region     = "us-central1"
+zone       = "us-central1-a"
+
+# Network Configuration
+use_default_vpc = false
+network_name    = "wazuh-vpc"
+subnet_name     = "wazuh-subnet"
+subnet_cidr     = "10.0.1.0/24"
+
+# Security Configuration
+allowed_ssh_cidr_ipv4 = ["YOUR_IPV4/32"]  # Replace with your IPv4 for production
+allowed_ssh_cidr_ipv6 = ["YOUR_IPV6/128"] # Replace with your IPv6 for production (optional)
+
+# Compute Instance Configuration
+instance_name      = "wazuh-aio"
+machine_type       = "e2-standard-4"
+boot_disk_size_gb  = 100
+boot_disk_type     = "pd-standard"
+os_image           = "ubuntu-os-cloud/ubuntu-2204-lts"
+enable_os_login    = false
+
+# Wazuh Configuration
+wazuh_admin_password = "YourSecurePassword123!"  # Change this!
+wazuh_version        = "4.14.1"
+
+# Secret Manager (optional)
+use_secret_manager = false
+secret_name        = "wazuh-admin-password"
+
+# GCP Pub/Sub Integration
+gcp_service_account_key_path = "./wazuh.json"  # Path to your service account key file
+pubsub_project_id            = "telecom-3app"  # Project ID where Pub/Sub subscription exists
+pubsub_subscription_id       = "your-subscription-id"  # Your Pub/Sub subscription ID
+
+# Legacy log export (deprecated - set to false)
+enable_log_export = false
+
+# Labels
+labels = {
+  env        = "production"
+  app        = "wazuh"
+  managed_by = "terraform"
+}
+
