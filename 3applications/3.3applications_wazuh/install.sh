@@ -287,6 +287,18 @@ fi
 # ============================================================
 # GCP Pub/Sub Integration Setup (Using Built-in Wazuh GCP-Pub/Sub Module)
 # ============================================================
+# This section configures Wazuh to pull GCP audit logs from Pub/Sub.
+# Steps:
+#   1. Wait for Wazuh manager to be ready
+#   2. Create credentials directory in container
+#   3. Download and validate service account key from metadata
+#   4. Copy credentials to container
+#   5. Install google-cloud-pubsub Python package
+#   6. Configure GCP Pub/Sub command wodle in ossec.conf
+#   7. Create GCP detection rules
+#   8. Restart Wazuh to apply configuration
+#   9. Test the GCP Pub/Sub connection
+# ============================================================
 log "Setting up GCP Pub/Sub integration using Wazuh's built-in module..."
 
 # Wait for Wazuh manager to be ready first
@@ -310,59 +322,119 @@ docker exec single-node-wazuh.manager-1 mkdir -p /var/ossec/wodles/gcp-pubsub
 # Download the GCP service account key from metadata and copy to container
 log "Downloading GCP service account key..."
 TMP_CREDS="/tmp/gcp-credentials.json"
+
+log "Fetching credentials from metadata server..."
 if ! curl -H "Metadata-Flavor: Google" \
     "http://metadata.google.internal/computeMetadata/v1/instance/attributes/gcp-sa-key" \
-    -o "$TMP_CREDS"; then
+    -o "$TMP_CREDS" 2>&1 | tee /tmp/curl_output.log; then
     log "ERROR: Failed to download GCP service account key from metadata"
+    cat /tmp/curl_output.log
     exit 1
 fi
 
+log "Credentials downloaded successfully"
+
 # Verify the JSON key is valid
+log "Validating JSON credentials..."
 if ! jq empty "$TMP_CREDS" 2>/dev/null; then
     log "ERROR: Downloaded service account key is not valid JSON"
+    log "First 200 characters of downloaded file:"
+    head -c 200 "$TMP_CREDS"
     rm -f "$TMP_CREDS"
     exit 1
 fi
 
+# Extract and log service account email
+SA_EMAIL=$(jq -r '.client_email' "$TMP_CREDS" 2>/dev/null || echo "unknown")
+SA_PROJECT=$(jq -r '.project_id' "$TMP_CREDS" 2>/dev/null || echo "unknown")
+log "✅ Valid credentials for service account: $SA_EMAIL"
+log "Service account project: $SA_PROJECT"
+
 # Copy credentials to container
+log "Copying credentials to Wazuh container..."
 docker cp "$TMP_CREDS" single-node-wazuh.manager-1:/var/ossec/wodles/gcp-pubsub/credentials.json
 docker exec single-node-wazuh.manager-1 chown root:wazuh /var/ossec/wodles/gcp-pubsub/credentials.json
 docker exec single-node-wazuh.manager-1 chmod 640 /var/ossec/wodles/gcp-pubsub/credentials.json
 rm -f "$TMP_CREDS"
-log "GCP service account key configured in Wazuh container"
+
+# Verify credentials in container
+if docker exec single-node-wazuh.manager-1 test -f /var/ossec/wodles/gcp-pubsub/credentials.json; then
+    CONTAINER_SA_EMAIL=$(docker exec single-node-wazuh.manager-1 grep -o '"client_email"[^,]*' /var/ossec/wodles/gcp-pubsub/credentials.json | cut -d'"' -f4)
+    log "✅ GCP service account key configured in Wazuh container: $CONTAINER_SA_EMAIL"
+else
+    log "ERROR: Credentials file not found in container"
+    exit 1
+fi
 
 # Install GCP Pub/Sub Python dependencies in Wazuh's framework Python
 log "Installing GCP Pub/Sub Python dependencies in Wazuh framework..."
-docker exec single-node-wazuh.manager-1 bash -c '
-    /var/ossec/framework/python/bin/pip3 install --upgrade google-cloud-pubsub==2.18.4
-'
+log "Using Python at: /var/ossec/framework/python/bin/pip3"
 
+# Check if pip exists
+if ! docker exec single-node-wazuh.manager-1 test -f /var/ossec/framework/python/bin/pip3; then
+    log "ERROR: pip3 not found at /var/ossec/framework/python/bin/pip3"
+    exit 1
+fi
+
+log "Installing google-cloud-pubsub==2.18.4..."
+if docker exec single-node-wazuh.manager-1 bash -c '/var/ossec/framework/python/bin/pip3 install --upgrade google-cloud-pubsub==2.18.4' 2>&1 | tee /tmp/pip_install.log; then
+    log "✅ pip install completed"
+else
+    log "ERROR: pip install failed"
+    cat /tmp/pip_install.log
+    exit 1
+fi
+
+log "Verifying installation..."
 if docker exec single-node-wazuh.manager-1 /var/ossec/framework/python/bin/pip3 list | grep -q google-cloud-pubsub; then
-    log "✅ GCP Pub/Sub dependencies installed successfully"
+    INSTALLED_VERSION=$(docker exec single-node-wazuh.manager-1 /var/ossec/framework/python/bin/pip3 list | grep google-cloud-pubsub)
+    log "✅ GCP Pub/Sub dependencies installed successfully: $INSTALLED_VERSION"
 else
     log "ERROR: Failed to install GCP Pub/Sub dependencies"
+    log "Installed packages:"
+    docker exec single-node-wazuh.manager-1 /var/ossec/framework/python/bin/pip3 list | head -20
     exit 1
 fi
 
 # Configure Wazuh GCP-Pub/Sub command wodle
 log "Configuring Wazuh GCP Pub/Sub command wodle..."
-docker exec single-node-wazuh.manager-1 python3 <<'PYEOF'
+
+# First, check if ossec.conf exists and is accessible
+log "Verifying ossec.conf exists..."
+if ! docker exec single-node-wazuh.manager-1 test -f /var/ossec/etc/ossec.conf; then
+    log "ERROR: /var/ossec/etc/ossec.conf not found"
+    exit 1
+fi
+log "ossec.conf found, proceeding with configuration..."
+
+# Create a temporary Python script with better error handling
+# NOTE: Using cat without quotes to allow variable substitution
+cat > /tmp/configure_gcp_wodle.py <<PYSCRIPT
 import re
+import sys
+import traceback
 
-ossec_conf_path = "/var/ossec/etc/ossec.conf"
-
-# Read current config
-with open(ossec_conf_path, "r") as f:
-    content = f.read()
-
-# Remove any existing gcp-pubsub or gcp command wodle configuration
-content = re.sub(r'<wodle name="gcp-pubsub">.*?</wodle>', '', content, flags=re.DOTALL)
-content = re.sub(r'<!-- GCP Pub/Sub.*?</wodle>', '', content, flags=re.DOTALL)
-
-# GCP Pub/Sub command wodle configuration
-# NOTE: The gcp-pubsub is NOT a native wodle module name in Wazuh
-# Instead, we invoke the gcloud script via command wodle
-gcp_wodle = """  <!-- GCP Pub/Sub Integration -->
+try:
+    ossec_conf_path = "/var/ossec/etc/ossec.conf"
+    
+    print("DEBUG: Reading ossec.conf...")
+    with open(ossec_conf_path, "r") as f:
+        content = f.read()
+    
+    print(f"DEBUG: Read {len(content)} bytes from ossec.conf")
+    
+    # Remove any existing gcp-pubsub or gcp command wodle configuration
+    print("DEBUG: Removing existing GCP configurations...")
+    content = re.sub(r'<wodle name="gcp-pubsub">.*?</wodle>', '', content, flags=re.DOTALL)
+    content = re.sub(r'<!-- GCP Pub/Sub.*?</wodle>', '', content, flags=re.DOTALL)
+    
+    # GCP Pub/Sub command wodle configuration with actual project and subscription values
+    print("DEBUG: Creating GCP wodle configuration...")
+    print("DEBUG: Project ID: ${pubsub_project_id}")
+    print("DEBUG: Subscription ID: ${pubsub_subscription_id}")
+    
+    gcp_wodle = """
+  <!-- GCP Pub/Sub Integration -->
   <wodle name="command">
     <disabled>no</disabled>
     <tag>gcp</tag>
@@ -374,27 +446,70 @@ gcp_wodle = """  <!-- GCP Pub/Sub Integration -->
   </wodle>
 
 """
+    
+    # Find the last </ossec_config> and insert before it
+    print("DEBUG: Finding last </ossec_config> tag...")
+    last_closing = content.rfind('</ossec_config>')
+    
+    if last_closing == -1:
+        print("ERROR: Could not find closing </ossec_config> tag")
+        sys.exit(1)
+    
+    print(f"DEBUG: Found </ossec_config> at position {last_closing}")
+    
+    # Insert the wodle configuration before the last closing tag
+    content = content[:last_closing] + gcp_wodle + content[last_closing:]
+    
+    print("DEBUG: Writing updated configuration...")
+    with open(ossec_conf_path, "w") as f:
+        f.write(content)
+    
+    print("SUCCESS: GCP Pub/Sub command wodle configured")
+    sys.exit(0)
+    
+except Exception as e:
+    print(f"ERROR: Failed to configure GCP wodle: {str(e)}")
+    print(f"ERROR: Full traceback:")
+    traceback.print_exc()
+    sys.exit(1)
+PYSCRIPT
 
-# Insert before first </ossec_config>
-content = content.replace("</ossec_config>", gcp_wodle + "</ossec_config>", 1)
+# Copy the script to the container and execute it
+log "Copying configuration script to container..."
+docker cp /tmp/configure_gcp_wodle.py single-node-wazuh.manager-1:/tmp/configure_gcp_wodle.py
 
-with open(ossec_conf_path, "w") as f:
-    f.write(content)
-
-print("✅ GCP Pub/Sub command wodle configured")
-PYEOF
-
-# Verify configuration was added
-if docker exec single-node-wazuh.manager-1 grep -q "GCP Pub/Sub Integration" /var/ossec/etc/ossec.conf; then
+log "Executing configuration script..."
+if docker exec single-node-wazuh.manager-1 python3 /tmp/configure_gcp_wodle.py; then
     log "✅ GCP Pub/Sub command wodle configured successfully"
+    
+    # Verify configuration was added
+    if docker exec single-node-wazuh.manager-1 grep -q "GCP Pub/Sub Integration" /var/ossec/etc/ossec.conf; then
+        log "✅ Configuration verified in ossec.conf"
+    else
+        log "WARNING: Configuration script succeeded but cannot verify in ossec.conf"
+    fi
 else
     log "ERROR: Failed to configure GCP Pub/Sub command wodle"
+    log "Displaying last 50 lines of ossec.conf for debugging:"
+    docker exec single-node-wazuh.manager-1 tail -50 /var/ossec/etc/ossec.conf
     exit 1
 fi
 
+# Cleanup
+rm -f /tmp/configure_gcp_wodle.py
+docker exec single-node-wazuh.manager-1 rm -f /tmp/configure_gcp_wodle.py
+
 # Create GCP detection rules (Wazuh has built-in ones, but we'll add custom ones)
 log "Creating GCP detection rules..."
-docker exec single-node-wazuh.manager-1 bash -c 'cat > /var/ossec/etc/rules/local_rules.xml <<'"'"'LOCALRULES'"'"'
+log "Creating rules file at /var/ossec/etc/rules/gcp_rules.xml..."
+
+# Check if rules directory exists
+if ! docker exec single-node-wazuh.manager-1 test -d /var/ossec/etc/rules; then
+    log "ERROR: Rules directory /var/ossec/etc/rules not found"
+    exit 1
+fi
+
+docker exec single-node-wazuh.manager-1 bash -c 'cat > /var/ossec/etc/rules/gcp_rules.xml <<'"'"'LOCALRULES'"'"'
 <!-- Local rules for GCP integration -->
 
 <group name="gcp,cloud,">
@@ -410,16 +525,16 @@ docker exec single-node-wazuh.manager-1 bash -c 'cat > /var/ossec/etc/rules/loca
   <!-- GCP Compute Instance operations -->
   <rule id="100101" level="5">
     <if_sid>100100</if_sid>
-    <field name="protoPayload.methodName">\.instances\.</field>
-    <description>GCP Compute: $(protoPayload.methodName)</description>
+    <field name="protoPayload.methodName">\\.instances\\.</field>
+    <description>GCP Compute: \$(protoPayload.methodName)</description>
     <group>gcp,compute,</group>
   </rule>
   
   <!-- GCP IAM operations -->
   <rule id="100102" level="6">
     <if_sid>100100</if_sid>
-    <field name="protoPayload.methodName">\.iam\.|\.serviceAccount\.</field>
-    <description>GCP IAM: $(protoPayload.methodName) by $(protoPayload.authenticationInfo.principalEmail)</description>
+    <field name="protoPayload.methodName">\\.iam\\.|\\.serviceAccount\\.</field>
+    <description>GCP IAM: \$(protoPayload.methodName) by \$(protoPayload.authenticationInfo.principalEmail)</description>
     <group>gcp,iam,</group>
   </rule>
   
@@ -428,7 +543,7 @@ docker exec single-node-wazuh.manager-1 bash -c 'cat > /var/ossec/etc/rules/loca
     <if_sid>100100</if_sid>
     <field name="protoPayload.serviceName">compute.googleapis.com</field>
     <field name="protoPayload.methodName">network|firewall|subnetwork|route</field>
-    <description>GCP Network: $(protoPayload.methodName)</description>
+    <description>GCP Network: \$(protoPayload.methodName)</description>
     <group>gcp,network,</group>
   </rule>
   
@@ -436,15 +551,15 @@ docker exec single-node-wazuh.manager-1 bash -c 'cat > /var/ossec/etc/rules/loca
   <rule id="100104" level="4">
     <if_sid>100100</if_sid>
     <field name="protoPayload.serviceName">storage.googleapis.com</field>
-    <description>GCP Storage: $(protoPayload.methodName)</description>
+    <description>GCP Storage: \$(protoPayload.methodName)</description>
     <group>gcp,storage,</group>
   </rule>
   
   <!-- GCP Permission denied -->
   <rule id="100105" level="8">
     <if_sid>100100</if_sid>
-    <field name="protoPayload.status.code">^7$</field>
-    <description>GCP Permission Denied: $(protoPayload.methodName) by $(protoPayload.authenticationInfo.principalEmail)</description>
+    <field name="protoPayload.status.code">^7\$</field>
+    <description>GCP Permission Denied: \$(protoPayload.methodName) by \$(protoPayload.authenticationInfo.principalEmail)</description>
     <group>gcp,access_denied,pci_dss_10.2.4,pci_dss_10.2.5,</group>
   </rule>
   
@@ -452,7 +567,7 @@ docker exec single-node-wazuh.manager-1 bash -c 'cat > /var/ossec/etc/rules/loca
   <rule id="100106" level="7">
     <if_sid>100100</if_sid>
     <field name="severity">ERROR</field>
-    <description>GCP Error: $(protoPayload.methodName)</description>
+    <description>GCP Error: \$(protoPayload.methodName)</description>
     <group>gcp,error,</group>
   </rule>
   
@@ -460,7 +575,7 @@ docker exec single-node-wazuh.manager-1 bash -c 'cat > /var/ossec/etc/rules/loca
   <rule id="100107" level="4">
     <if_sid>100100</if_sid>
     <field name="severity">WARNING</field>
-    <description>GCP Warning: $(protoPayload.methodName)</description>
+    <description>GCP Warning: \$(protoPayload.methodName)</description>
     <group>gcp,warning,</group>
   </rule>
   
@@ -468,15 +583,15 @@ docker exec single-node-wazuh.manager-1 bash -c 'cat > /var/ossec/etc/rules/loca
   <rule id="100108" level="12">
     <if_sid>100100</if_sid>
     <field name="severity">CRITICAL|ALERT|EMERGENCY</field>
-    <description>GCP Critical Event: $(protoPayload.methodName)</description>
+    <description>GCP Critical Event: \$(protoPayload.methodName)</description>
     <group>gcp,critical,</group>
   </rule>
   
   <!-- GCP Resource deletion -->
   <rule id="100109" level="6">
     <if_sid>100100</if_sid>
-    <field name="protoPayload.methodName">\.delete$</field>
-    <description>GCP Resource Deletion: $(protoPayload.methodName) by $(protoPayload.authenticationInfo.principalEmail)</description>
+    <field name="protoPayload.methodName">\\.delete\$</field>
+    <description>GCP Resource Deletion: \$(protoPayload.methodName) by \$(protoPayload.authenticationInfo.principalEmail)</description>
     <group>gcp,resource_deletion,</group>
   </rule>
 
@@ -484,21 +599,50 @@ docker exec single-node-wazuh.manager-1 bash -c 'cat > /var/ossec/etc/rules/loca
 LOCALRULES
 '
 
+# Verify rules were created
+log "Verifying GCP rules were created..."
+if docker exec single-node-wazuh.manager-1 test -f /var/ossec/etc/rules/gcp_rules.xml; then
+    RULE_COUNT=$(docker exec single-node-wazuh.manager-1 grep -c "<rule id=" /var/ossec/etc/rules/gcp_rules.xml || echo "0")
+    log "✅ GCP detection rules created with $RULE_COUNT rules"
+else
+    log "ERROR: Failed to create GCP rules file"
+    exit 1
+fi
+
 # Restart Wazuh to load the new configuration
 log "Restarting Wazuh to load GCP command wodle..."
-docker exec single-node-wazuh.manager-1 /var/ossec/bin/wazuh-control restart > /dev/null 2>&1
+log "Current Wazuh processes before restart:"
+docker exec single-node-wazuh.manager-1 ps aux | grep -E "wazuh|ossec" | grep -v grep | head -5
+
+if docker exec single-node-wazuh.manager-1 /var/ossec/bin/wazuh-control restart > /tmp/wazuh_restart.log 2>&1; then
+    log "✅ Wazuh restarted successfully"
+    cat /tmp/wazuh_restart.log | tail -10
+else
+    log "ERROR: Wazuh restart failed"
+    cat /tmp/wazuh_restart.log
+    exit 1
+fi
+
+log "Waiting 60 seconds for Wazuh to fully initialize..."
 sleep 60
 
 # Verify GCP command wodle is running
 log "Verifying GCP Pub/Sub command wodle status..."
-if docker exec single-node-wazuh.manager-1 grep -i "command:gcp" /var/ossec/logs/ossec.log > /dev/null 2>&1; then
+log "Checking ossec.log for GCP wodle activity..."
+
+# Check if wodle is mentioned in logs
+if docker exec single-node-wazuh.manager-1 grep -i "command:gcp\|wazuh-modulesd.*command" /var/ossec/logs/ossec.log > /dev/null 2>&1; then
     log "✅ GCP Pub/Sub command wodle is active"
+    docker exec single-node-wazuh.manager-1 grep -i "command:gcp\|wazuh-modulesd.*command" /var/ossec/logs/ossec.log | tail -5
 else
     log "⚠️  GCP Pub/Sub command wodle may not be active yet (check logs later)"
+    log "Recent ossec.log entries:"
+    docker exec single-node-wazuh.manager-1 tail -20 /var/ossec/logs/ossec.log
 fi
 
 # Verify rules were loaded
-if docker exec single-node-wazuh.manager-1 grep -q "100100" /var/ossec/etc/rules/local_rules.xml; then
+log "Verifying GCP rules were loaded..."
+if docker exec single-node-wazuh.manager-1 grep -q "100100" /var/ossec/etc/rules/gcp_rules.xml; then
     log "✅ GCP detection rules loaded"
 else
     log "⚠️  Warning: GCP rules may not be loaded correctly"
@@ -506,10 +650,35 @@ fi
 
 # Test manual execution of GCP wodle
 log "Testing GCP Pub/Sub connection..."
-if docker exec single-node-wazuh.manager-1 timeout 30 /var/ossec/wodles/gcloud/gcloud -T pubsub -p ${pubsub_project_id} -s ${pubsub_subscription_id} -c /var/ossec/wodles/gcp-pubsub/credentials.json -m 2 -l 1 2>&1 | grep -q "Received and acknowledged"; then
-    log "✅ GCP Pub/Sub connection successful - logs are being pulled!"
+log "Executing: /var/ossec/wodles/gcloud/gcloud -T pubsub -p ${pubsub_project_id} -s ${pubsub_subscription_id} -c /var/ossec/wodles/gcp-pubsub/credentials.json -m 2 -l 1"
+
+# Store test output
+TEST_OUTPUT=$(docker exec single-node-wazuh.manager-1 timeout 30 /var/ossec/wodles/gcloud/gcloud -T pubsub -p ${pubsub_project_id} -s ${pubsub_subscription_id} -c /var/ossec/wodles/gcp-pubsub/credentials.json -m 2 -l 1 2>&1)
+TEST_EXIT_CODE=$?
+
+log "Test exit code: $TEST_EXIT_CODE"
+
+if echo "$TEST_OUTPUT" | grep -q "Received and acknowledged"; then
+    MESSAGE_COUNT=$(echo "$TEST_OUTPUT" | grep -oP "Received and acknowledged \K\d+" || echo "unknown")
+    log "✅ GCP Pub/Sub connection successful - pulled $MESSAGE_COUNT messages!"
+    log "Sample output:"
+    echo "$TEST_OUTPUT" | grep -E "(INFO|DEBUG|Received)" | head -10
+elif echo "$TEST_OUTPUT" | grep -qi "error\|critical\|failed"; then
+    log "⚠️  GCP Pub/Sub connection test encountered errors:"
+    echo "$TEST_OUTPUT" | grep -E "(ERROR|CRITICAL|Failed)" | head -10
+    log "Full output saved for debugging:"
+    echo "$TEST_OUTPUT" > /tmp/gcp_test_output.log
+    log "Checking credentials..."
+    if docker exec single-node-wazuh.manager-1 test -f /var/ossec/wodles/gcp-pubsub/credentials.json; then
+        log "Credentials file exists"
+        docker exec single-node-wazuh.manager-1 ls -la /var/ossec/wodles/gcp-pubsub/credentials.json
+    else
+        log "ERROR: Credentials file missing!"
+    fi
 else
     log "⚠️  GCP Pub/Sub connection test inconclusive (check subscription has messages)"
+    log "Test output:"
+    echo "$TEST_OUTPUT" | head -20
 fi
 
 log "GCP Pub/Sub integration setup complete (using command wodle)!"
@@ -581,24 +750,42 @@ log ""
 log "Dashboard Access:"
 log "  URL: http://localhost:5601 (via SSH tunnel)"
 log "  Username: admin"
-log "  Password: $${ADMIN_PASSWORD}"
+log "  Password: [configured password]"
 log ""
 log "SSH Tunnel Command:"
-log "  gcloud compute ssh $$(hostname) --zone=$$(gcloud compute instances list --filter=name:$$(hostname) --format='value(zone)') --project=$${pubsub_project_id} -- -L 5601:localhost:5601"
+log "  gcloud compute ssh $$(hostname) --zone=$$(gcloud compute instances list --filter=name:$$(hostname) --format='value(zone)') --project=${pubsub_project_id} -- -L 5601:localhost:5601"
 log ""
 log "GCP Pub/Sub Integration:"
 log "  Status: Enabled (command wodle)"
 log "  Integration: GCloud Pub/Sub"
-log "  Project: $${pubsub_project_id}"
-log "  Subscription: $${pubsub_subscription_id}"
-log "  Check wodle logs: docker exec single-node-wazuh.manager-1 grep 'command:gcp' /var/ossec/logs/ossec.log"
+log "  Project: ${pubsub_project_id}"
+log "  Subscription: ${pubsub_subscription_id}"
+log ""
+log "Verification Commands:"
+log "  Check GCP wodle logs:"
+log "    docker exec single-node-wazuh.manager-1 grep 'command:gcp' /var/ossec/logs/ossec.log"
+log ""
+log "  Check GCP configuration:"
+log "    docker exec single-node-wazuh.manager-1 grep -A 10 'GCP Pub/Sub' /var/ossec/etc/ossec.conf"
+log ""
+log "  Test GCP connection:"
+log "    docker exec single-node-wazuh.manager-1 /var/ossec/wodles/gcloud/gcloud -T pubsub -p ${pubsub_project_id} -s ${pubsub_subscription_id} -c /var/ossec/wodles/gcp-pubsub/credentials.json -m 5 -l 1"
+log ""
+log "  Check Wazuh status:"
+log "    docker exec single-node-wazuh.manager-1 /var/ossec/bin/wazuh-control status"
 log ""
 log "To view GCP logs in dashboard:"
 log "  1. Create SSH tunnel (see command above)"
 log "  2. Open http://localhost:5601"
 log "  3. Go to 'Security events' or 'Discover'"
 log "  4. Filter by: rule.groups:gcp OR integration:gcp"
-log "  5. GCP logs include: Cloud Run, Cloud Functions, API Gateway, Compute Engine, IAM, Firewall, Storage, etc."
+log "  5. GCP logs include: Cloud Run, Cloud Functions, API Gateway, Compute Engine, IAM, Firewall, Storage, K8s, etc."
+log ""
+log "Troubleshooting:"
+log "  If no GCP logs appear:"
+log "    - Check that messages exist in Pub/Sub: gcloud pubsub subscriptions pull ${pubsub_subscription_id} --project=${pubsub_project_id} --limit=1"
+log "    - Verify service account permissions: Pub/Sub Subscriber role"
+log "    - Check Wazuh logs: docker exec single-node-wazuh.manager-1 tail -100 /var/ossec/logs/ossec.log"
 log ""
 log "Installation log saved to: /var/log/wazuh-install.log"
 log ""
