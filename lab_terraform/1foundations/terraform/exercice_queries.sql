@@ -4,7 +4,7 @@ SELECT
   COUNT(DISTINCT jsonPayload.connection.dest_port) AS unique_ports_targeted,
   ARRAY_AGG(DISTINCT CAST(jsonPayload.connection.dest_port AS INT64)) AS ports_list
 FROM
-  `bounc-473410.vpc_flow_and_audit_logs.compute_googleapis_com_vpc_flows_20251206`
+  `<vpc_flowlogs_table>`
 WHERE
   resource.type = "gce_subnetwork"
   AND jsonPayload.connection.dest_port IS NOT NULL
