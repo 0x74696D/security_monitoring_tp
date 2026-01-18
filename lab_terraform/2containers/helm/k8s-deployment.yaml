@@ -17,6 +17,6 @@ spec:
     spec:
       containers:
       - name: vuln-app
-        image: us-central1-docker.pkg.dev/bounc-473410/lab-test-repo/vuln-app
+        image: <your-image-repository>/vuln-app:<your-image-tag>
         ports:
         - containerPort: 8080

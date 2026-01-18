@@ -1,0 +1,7 @@
+project_id   = "your-project-id"
+region       = "us-central1"
+zone         = "us-central1-a"
+cluster_name = "lab-test-cluster"
+machine_type = "e2-small"
+node_count   = 1
+
