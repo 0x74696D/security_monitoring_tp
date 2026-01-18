@@ -4,10 +4,6 @@ metadata:
   name: vuln-app-svc
 spec:
   type: LoadBalancer
-  # Restrict LoadBalancer access to specific IP addresses
-  # Replace with your actual IP address in CIDR notation
-  loadBalancerSourceRanges:
-  - YOUR_IP_ADDRESS/32
   selector:
     app: vuln-app
   ports:

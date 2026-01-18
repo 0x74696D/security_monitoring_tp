@@ -11,7 +11,7 @@ spec:
   ingress:
   - from:
     - ipBlock:
-        cidr: 196.235.14.92/32
+        cidr: <your-ip-address>/32
     ports:
     - protocol: TCP
       port: 8080
