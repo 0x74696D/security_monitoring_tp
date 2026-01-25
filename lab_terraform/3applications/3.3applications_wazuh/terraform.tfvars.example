@@ -1,5 +1,5 @@
 # Project Configuration
-project_id = "telecom-3app"
+project_id = "your_project_id"
 region     = "us-central1"
 zone       = "us-central1-a"
 
@@ -39,7 +39,7 @@ enable_log_export = false
 
 # Labels
 labels = {
-  env        = "production"
+  env        = "lab"
   app        = "wazuh"
   managed_by = "terraform"
 }

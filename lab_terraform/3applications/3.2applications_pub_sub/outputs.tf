@@ -26,6 +26,5 @@ output "wazuh_service_account_email" {
 output "wazuh_key_file_path" {
   description = "Path to the Wazuh service account key file"
   value       = local_file.wazuh_key.filename
-  sensitive   = true
 }
 

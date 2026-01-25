@@ -31,8 +31,8 @@ bucket_name = ""
 # Can only be enabled when environment = "lab"
 
 # Enable IDOR vulnerability (bypass object ownership checks)
-lab_mode_skip_object_ownership_check = false
+lab_mode_skip_object_ownership_check = true
 
 # Enable weak JWT validation (bypass token verification)
-lab_mode_weak_token_validation = false
+lab_mode_weak_token_validation = true
 

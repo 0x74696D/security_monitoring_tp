@@ -213,6 +213,6 @@ echo "  User ID: $USER_ID"
 echo "  Image ID: $IMAGE_ID (deleted)"
 echo ""
 echo "View logs with:"
-echo "  gcloud logging read 'resource.type=cloud_function AND jsonPayload.user_id=\"$USER_ID\"' --limit 20 --format json"
+echo "  gcloud logging read 'resource.type=cloud_run_revision' --limit 20 --format json"
 echo ""
 
